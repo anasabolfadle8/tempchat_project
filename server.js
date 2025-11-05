@@ -15,7 +15,7 @@ const io = new Server(server);
 
 const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
-const CHAT_PASSWORD = process.env.CHAT_PASSWORD || "11122009"; // fixed password for all rooms
+const CHAT_PASSWORD = process.env.CHAT_PASSWORD;
 
 // Ensure data folder
 const DATA_DIR = path.join(process.cwd(), "data");
