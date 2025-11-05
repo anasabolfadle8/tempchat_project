@@ -1,0 +1,194 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TempChat Room</title>
+<style>
+  body {
+    font-family: system-ui, sans-serif;
+    margin: 0;
+    background: #f5f5f7;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+  h3 {
+    text-align: center;
+    margin: 10px 0;
+    color: #333;
+  }
+  #chat {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+  }
+  .bubble {
+    max-width: 80%;
+    padding: 10px 14px;
+    border-radius: 16px;
+    margin: 6px 0;
+    line-height: 1.4em;
+    word-wrap: break-word;
+    display: inline-block;
+  }
+  .mine {
+    align-self: flex-end;
+    background: var(--mycolor);
+    color: white;
+    border-bottom-right-radius: 5px;
+  }
+  .theirs {
+    align-self: flex-start;
+    background: var(--theircolor);
+    color: black;
+    border-bottom-left-radius: 5px;
+  }
+  .system {
+    align-self: center;
+    font-size: 0.85em;
+    color: #888;
+  }
+  #controls {
+    display: flex;
+    padding: 10px;
+    background: white;
+    border-top: 1px solid #ddd;
+  }
+  #msg {
+    flex: 1;
+    padding: 10px;
+    border-radius: 20px;
+    border: 1px solid #ccc;
+    outline: none;
+  }
+  #send, #end {
+    padding: 10px 14px;
+    margin-left: 6px;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  #send {
+    background: #007aff;
+    color: white;
+  }
+  #end {
+    background: #ff3b30;
+    color: white;
+  }
+</style>
+</head>
+<body>
+<h3 id="title">Joining...</h3>
+<div id="chat"></div>
+<div id="controls">
+  <input id="msg" placeholder="Write a message..." />
+  <button id="send">Send</button>
+  <button id="end">End</button>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const qs = new URLSearchParams(window.location.search);
+const roomId = qs.get('roomId');
+const sessionId = qs.get('sessionId');
+const name = qs.get('name') || 'Guest';
+const title = document.getElementById('title');
+const chat = document.getElementById('chat');
+const send = document.getElementById('send');
+const msgInput = document.getElementById('msg');
+const endBtn = document.getElementById('end');
+
+if (!roomId || !sessionId) {
+  title.textContent = "Invalid link. Missing parameters.";
+  document.getElementById('controls').style.display='none';
+  throw new Error('missing params');
+}
+
+// ask user for fixed password
+const password = prompt('Enter chat password (ask partner)');
+
+// Assign random color to each user (persistent per browser)
+let myColor = localStorage.getItem('myColor');
+if (!myColor) {
+  const colors = ['#007AFF', '#34C759', '#FF9500', '#FF2D55', '#5AC8FA', '#AF52DE'];
+  myColor = colors[Math.floor(Math.random() * colors.length)];
+  localStorage.setItem('myColor', myColor);
+}
+document.documentElement.style.setProperty('--mycolor', myColor);
+
+// Other user color placeholder
+document.documentElement.style.setProperty('--theircolor', '#e6e6eb');
+
+fetch(`/api/validate?roomId=${encodeURIComponent(roomId)}&sessionId=${encodeURIComponent(sessionId)}`)
+  .then(r => r.json())
+  .then(data => {
+    if (!data.ok) {
+      title.textContent = "Invalid or expired session.";
+      document.getElementById('controls').style.display='none';
+      return;
+    }
+    title.textContent = `Room ${roomId} — ${data.name}`;
+    initSocket();
+  });
+
+function append(msg) {
+  const d = document.createElement('div');
+  const time = new Date(msg.at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  if (msg.from === 'System') {
+    d.className = 'bubble system';
+    d.textContent = msg.text;
+  } else if (msg.from === name) {
+    d.className = 'bubble mine';
+    d.innerHTML = `${msg.text}<div style="font-size:0.7em;opacity:0.8;text-align:right;">${time}</div>`;
+  } else {
+    d.className = 'bubble theirs';
+    d.innerHTML = `<b>${msg.from}:</b> ${msg.text}<div style="font-size:0.7em;opacity:0.6;text-align:left;">${time}</div>`;
+    if (msg.color) d.style.background = msg.color;
+  }
+  chat.appendChild(d);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function initSocket() {
+  const socket = io();
+
+  socket.on('connect', () => {
+    socket.emit('join', { roomId, sessionId, displayName: name, password, color: myColor });
+  });
+
+  socket.on('history', arr => arr.forEach(append));
+  socket.on('joined', () => append({from:'System', text:'You joined the room', at:Date.now()}));
+  socket.on('user_joined', u => append({from:'System', text:`${u.name} joined`, at:Date.now()}));
+  socket.on('message', append);
+  socket.on('join_error', e => {
+    title.textContent = 'Join error: ' + e;
+    document.getElementById('controls').style.display='none';
+  });
+
+  send.addEventListener('click', () => {
+    const text = msgInput.value.trim();
+    if (!text) return;
+    socket.emit('message', { roomId, text });
+    msgInput.value = '';
+  });
+
+  msgInput.addEventListener('keypress', e => {
+    if (e.key === 'Enter') send.click();
+  });
+
+  endBtn.addEventListener('click', async () => {
+    const res = await fetch('/api/end', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ roomId, sessionId }) });
+    const j = await res.json();
+    if (j.ok) {
+      append({from:'System',text:'You ended the session',at:Date.now()});
+      document.getElementById('controls').style.display='none';
+    } else alert('Failed: ' + (j.error || 'unknown'));
+  });
+}
+</script>
+</body>
+</html>

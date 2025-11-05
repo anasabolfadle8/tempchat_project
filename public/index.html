@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>TempChat - Create</title></head>
+<body style="font-family:system-ui;padding:16px">
+  <h2>انشئ غرفة دردشة مؤقتة</h2>
+  <label>اسم الغرفة: <input id="name" value="PrivateChat" /></label><br/><br/>
+  <label>مدة البقاء بالثواني (افتراضي 7 أيام): <input id="ttl" value="604800" /></label><br/><br/>
+  <button id="create">Create Room</button>
+  <pre id="out"></pre>
+<script>
+  document.getElementById('create').addEventListener('click', async () => {
+    const name = document.getElementById('name').value;
+    const ttl = Number(document.getElementById('ttl').value) || 604800;
+    const res = await fetch('/api/create', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, ttlSeconds: ttl }) });
+    const j = await res.json();
+    if (j.ok) {
+      document.getElementById('out').textContent = 'Share this link:\n' + j.joinUrl + '\n\nPassword (fixed for server): set in server env CHAT_PASSWORD';
+    } else {
+      document.getElementById('out').textContent = 'Error: ' + JSON.stringify(j);
+    }
+  });
+</script>
+</body>
+</html>

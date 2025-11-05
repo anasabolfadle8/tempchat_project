@@ -1,0 +1,19 @@
+{
+  "name": "tempchat-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "express-rate-limit": "^6.7.0",
+    "nanoid": "^4.0.0",
+    "socket.io": "^4.7.2"
+  },
+  "description": "TempChat - Simple temporary chat server Features: - Publicly deployable (Render/Glitch/Railway) - Fixed server-wide password (CHAT_PASSWORD) required to join - Messages persisted locally under /data as JSON files",
+  "main": "server.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
