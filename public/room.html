@@ -18,12 +18,14 @@
     margin: 10px 0;
     color: #333;
   }
+  #main { flex: 1; display: flex; overflow: hidden; }
   #chat {
-    flex: 1;
+    flex: 3;
     overflow-y: auto;
     padding: 10px;
     display: flex;
     flex-direction: column;
+    border-right: 1px solid #ddd;
   }
   .bubble {
     max-width: 80%;
@@ -33,6 +35,7 @@
     line-height: 1.4em;
     word-wrap: break-word;
     display: inline-block;
+    position: relative;
   }
   .mine {
     align-self: flex-end;
@@ -51,6 +54,29 @@
     font-size: 0.85em;
     color: #888;
   }
+  .date-separator {
+    align-self: center;
+    background: #ddd;
+    color: #333;
+    font-size: 0.8em;
+    padding: 4px 10px;
+    border-radius: 10px;
+    margin: 10px 0;
+  }
+  .seen-list {
+    font-size: 0.65em;
+    opacity: 0.8;
+    text-align: right;
+    margin-top: 3px;
+  }
+  #users {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px;
+    background: #f0f0f0;
+  }
+  #users h4 { margin-top: 0; }
+  .user-item { margin: 4px 0; font-size: 0.9em; }
   #controls {
     display: flex;
     padding: 10px;
@@ -71,19 +97,20 @@
     border-radius: 10px;
     cursor: pointer;
   }
-  #send {
-    background: #007aff;
-    color: white;
-  }
-  #end {
-    background: #ff3b30;
-    color: white;
-  }
+  #send { background: #007aff; color: white; }
+  #end { background: #ff3b30; color: white; }
 </style>
 </head>
 <body>
 <h3 id="title">Joining...</h3>
-<div id="chat"></div>
+<div id="main">
+  <div id="chat"></div>
+  <div id="users">
+    <h4>Users</h4>
+    <div id="userList"></div>
+    <div id="typingIndicator" style="font-style: italic; color: #666; margin: 4px 0;"></div>
+  </div>
+</div>
 <div id="controls">
   <input id="msg" placeholder="Write a message..." />
   <button id="send">Send</button>
@@ -101,6 +128,7 @@ const chat = document.getElementById('chat');
 const send = document.getElementById('send');
 const msgInput = document.getElementById('msg');
 const endBtn = document.getElementById('end');
+const userList = document.getElementById('userList');
 
 if (!roomId || !sessionId) {
   title.textContent = "Invalid link. Missing parameters.";
@@ -108,85 +136,145 @@ if (!roomId || !sessionId) {
   throw new Error('missing params');
 }
 
-// ask user for fixed password
 const password = prompt('Enter chat password (ask partner)');
 
-// Assign random color to each user (persistent per browser)
 let myColor = localStorage.getItem('myColor');
 if (!myColor) {
-  const colors = ['#007AFF', '#34C759', '#FF9500', '#FF2D55', '#5AC8FA', '#AF52DE'];
-  myColor = colors[Math.floor(Math.random() * colors.length)];
+  const colors = ['#007AFF','#34C759','#FF9500','#FF2D55','#5AC8FA','#AF52DE'];
+  myColor = colors[Math.floor(Math.random()*colors.length)];
   localStorage.setItem('myColor', myColor);
 }
 document.documentElement.style.setProperty('--mycolor', myColor);
-
-// Other user color placeholder
 document.documentElement.style.setProperty('--theircolor', '#e6e6eb');
 
 fetch(`/api/validate?roomId=${encodeURIComponent(roomId)}&sessionId=${encodeURIComponent(sessionId)}`)
-  .then(r => r.json())
-  .then(data => {
-    if (!data.ok) {
-      title.textContent = "Invalid or expired session.";
-      document.getElementById('controls').style.display='none';
-      return;
-    }
-    title.textContent = `Room ${roomId} — ${data.name}`;
+  .then(r=>r.json())
+  .then(data=>{
+    if(!data.ok){title.textContent="Invalid or expired session.";document.getElementById('controls').style.display='none';return;}
+    title.textContent=`Room ${roomId} — ${data.name}`;
     initSocket();
   });
 
+let lastDateShown = null;
+
 function append(msg) {
+  const msgDate = new Date(msg.at);
+  const dateStr = msgDate.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' });
+
+  if (lastDateShown !== dateStr) {
+    const sep = document.createElement('div');
+    sep.className = 'date-separator';
+    sep.textContent = `📅 ${dateStr}`;
+    chat.appendChild(sep);
+    lastDateShown = dateStr;
+  }
+
   const d = document.createElement('div');
-  const time = new Date(msg.at).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  d.classList.add('bubble');
+  const time = msgDate.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+
   if (msg.from === 'System') {
-    d.className = 'bubble system';
+    d.classList.add('system');
     d.textContent = msg.text;
   } else if (msg.from === name) {
-    d.className = 'bubble mine';
+    d.classList.add('mine');
     d.innerHTML = `${msg.text}<div style="font-size:0.7em;opacity:0.8;text-align:right;">${time}</div>`;
+    if (msg.seenBy?.length) {
+      const seenDiv = document.createElement('div');
+      seenDiv.className = 'seen-list';
+      seenDiv.textContent = 'Seen by: ' + msg.seenBy.join(', ');
+      d.appendChild(seenDiv);
+    }
   } else {
-    d.className = 'bubble theirs';
+    d.classList.add('theirs');
     d.innerHTML = `<b>${msg.from}:</b> ${msg.text}<div style="font-size:0.7em;opacity:0.6;text-align:left;">${time}</div>`;
     if (msg.color) d.style.background = msg.color;
   }
+
+  d.dataset.id = msg.id;
   chat.appendChild(d);
   chat.scrollTop = chat.scrollHeight;
 }
 
-function initSocket() {
-  const socket = io();
+function renderUsers(users){
+  userList.innerHTML='';
+  Object.values(users).forEach(u=>{
+    const d=document.createElement('div');
+    d.className='user-item';
+    let status;
+    if(u.isOnline) status='<span style="color:green">● Online</span>';
+    else {
+      const diff=Date.now()-u.lastSeen;
+      if(diff<60000) status='last seen just now';
+      else if(diff<3600000) status=`last seen ${Math.floor(diff/60000)} min ago`;
+      else if(diff<86400000) status=`last seen ${Math.floor(diff/3600000)} hr ago`;
+      else status=`last seen ${Math.floor(diff/86400000)} days ago`;
+    }
+    d.innerHTML=`<span style="color:${u.color}">●</span> ${u.name} — ${status}`;
+    userList.appendChild(d);
+  });
+}
 
-  socket.on('connect', () => {
-    socket.emit('join', { roomId, sessionId, displayName: name, password, color: myColor });
+function initSocket(){
+  const socket = io();
+  const typingIndicator=document.getElementById('typingIndicator');
+  let typingTimeout;
+
+  socket.on('connect',()=>{
+    socket.emit('join',{roomId,sessionId,displayName:name,password,color:myColor});
   });
 
-  socket.on('history', arr => arr.forEach(append));
-  socket.on('joined', () => append({from:'System', text:'You joined the room', at:Date.now()}));
-  socket.on('user_joined', u => append({from:'System', text:`${u.name} joined`, at:Date.now()}));
-  socket.on('message', append);
-  socket.on('join_error', e => {
-    title.textContent = 'Join error: ' + e;
+  msgInput.addEventListener('input',()=>{
+    socket.emit('typing',{roomId,name});
+    clearTimeout(typingTimeout);
+    typingTimeout=setTimeout(()=>socket.emit('stop_typing',{roomId,name}),1000);
+  });
+
+  socket.on('user_typing',({name})=>typingIndicator.textContent=`${name} is typing...`);
+  socket.on('user_stop_typing',()=>typingIndicator.textContent='');
+
+  socket.on('history',arr=>arr.forEach(append));
+  socket.on('joined',()=>append({from:'System',text:'You joined the room',at:Date.now()}));
+  socket.on('user_joined',u=>append({from:'System',text:`${u.name} joined`,at:Date.now()}));
+  socket.on('user_left',u=>append({from:'System',text:`${u.name} left`,at:Date.now()}));
+  socket.on('message',msg=>{
+    append(msg);
+    if(msg.from!==name) socket.emit('message_seen',{roomId,messageId:msg.id,viewer:name});
+  });
+  socket.on('update_seen',({messageId,seenBy})=>{
+    const msgEl=document.querySelector(`[data-id="${messageId}"]`);
+    if(msgEl && msgEl.classList.contains('mine')){
+      let seenDiv=msgEl.querySelector('.seen-list');
+      if(!seenDiv){
+        seenDiv=document.createElement('div');
+        seenDiv.className='seen-list';
+        msgEl.appendChild(seenDiv);
+      }
+      seenDiv.textContent='Seen by: '+seenBy.join(', ');
+    }
+  });
+
+  socket.on('join_error',e=>{
+    title.textContent='Join error: '+e;
     document.getElementById('controls').style.display='none';
   });
 
-  send.addEventListener('click', () => {
-    const text = msgInput.value.trim();
-    if (!text) return;
-    socket.emit('message', { roomId, text });
-    msgInput.value = '';
+  socket.on('last_active',renderUsers);
+  setInterval(()=>socket.emit('refresh_users',{roomId}),60000);
+
+  send.addEventListener('click',()=>{
+    const text=msgInput.value.trim();
+    if(!text)return;
+    socket.emit('message',{roomId,text});
+    msgInput.value='';
   });
 
-  msgInput.addEventListener('keypress', e => {
-    if (e.key === 'Enter') send.click();
-  });
-
-  endBtn.addEventListener('click', async () => {
-    const res = await fetch('/api/end', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ roomId, sessionId }) });
-    const j = await res.json();
-    if (j.ok) {
-      append({from:'System',text:'You ended the session',at:Date.now()});
-      document.getElementById('controls').style.display='none';
-    } else alert('Failed: ' + (j.error || 'unknown'));
+  msgInput.addEventListener('keypress',e=>{if(e.key==='Enter')send.click();});
+  endBtn.addEventListener('click',async()=>{
+    const res=await fetch('/api/end',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({roomId,sessionId})});
+    const j=await res.json();
+    if(j.ok){append({from:'System',text:'You ended the session',at:Date.now()});document.getElementById('controls').style.display='none';}
+    else alert('Failed: '+(j.error||'unknown'));
   });
 }
 </script>
