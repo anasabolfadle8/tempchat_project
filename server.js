@@ -1,4 +1,3 @@
-// server.js
 import express from "express";
 import http from "http";
 import { Server } from "socket.io";
@@ -17,7 +16,6 @@ const PORT = process.env.PORT || 3000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const CHAT_PASSWORD = process.env.CHAT_PASSWORD;
 
-// Ensure data folder
 const DATA_DIR = path.join(process.cwd(), "data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -25,28 +23,19 @@ app.use(express.json());
 app.use(express.static(path.join(process.cwd(), "public")));
 
 const rooms = new Map();
-// rooms: roomId -> { sessionId, name, creatorSocketId, expiresAt }
-
 const createLimiter = rateLimit({ windowMs: 5000, max: 10 });
 
 app.post('/api/create', createLimiter, (req, res) => {
   const name = (req.body?.name || 'Room').toString().slice(0, 48);
   const roomId = Math.floor(1000 + Math.random() * 9000).toString();
   const sessionId = nanoid(48);
-
-  // لا يوجد وقت انتهاء إطلاقًا
-  const ttlSeconds = null;
-  const expiresAt = null;
-
-  // لا نستخدم setTimeout نهائيًا
   rooms.set(roomId, { sessionId, name, creatorSocketId: null, expiresAt: null, timeoutObj: null });
 
-  // create data file
   const filePath = path.join(DATA_DIR, `${roomId}.json`);
-  if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, JSON.stringify({ roomId, name, messages: [] }, null, 2));
+  if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, JSON.stringify({ roomId, name, messages: [], users: {} }, null, 2));
 
   const joinUrl = `${BASE_URL}/room.html?roomId=${encodeURIComponent(roomId)}&sessionId=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`;
-  return res.json({ ok: true, roomId, sessionId, joinUrl, expiresAt });
+  return res.json({ ok: true, roomId, sessionId, joinUrl, expiresAt: null });
 });
 
 app.post('/api/end', (req, res) => {
@@ -64,12 +53,10 @@ app.get('/api/validate', (req, res) => {
   const { roomId, sessionId } = req.query;
   if (!roomId || !sessionId) return res.json({ ok: false });
   const room = rooms.get(String(roomId));
-  if (!room) return res.json({ ok: false });
-  if (room.sessionId !== String(sessionId)) return res.json({ ok: false });
+  if (!room || room.sessionId !== String(sessionId)) return res.json({ ok: false });
   return res.json({ ok: true, name: room.name, expiresAt: room.expiresAt });
 });
 
-// serve list of messages (only if provide correct password)
 app.get('/api/messages', (req, res) => {
   const { roomId, password } = req.query;
   if (!roomId) return res.status(400).json({ ok: false });
@@ -81,6 +68,17 @@ app.get('/api/messages', (req, res) => {
 });
 
 io.on('connection', (socket) => {
+
+  // ✨ Typing indicator
+  socket.on('typing', ({ roomId, name }) => {
+    socket.to(roomId).emit('user_typing', { name });
+  });
+
+  socket.on('stop_typing', ({ roomId, name }) => {
+    socket.to(roomId).emit('user_stop_typing', { name });
+  });
+
+  // ✨ Joining room
   socket.on('join', ({ roomId, sessionId, displayName, password }) => {
     const room = rooms.get(String(roomId));
     if (!room) { socket.emit('join_error', 'Room not found or expired'); return; }
@@ -89,60 +87,89 @@ io.on('connection', (socket) => {
 
     socket.join(roomId);
     socket.data.displayName = displayName || 'Guest';
-// assign a consistent random color to this user
-const colors = ['#007AFF', '#FF2D55', '#34C759', '#FF9500', '#AF52DE', '#5AC8FA', '#FFCC00'];
-socket.data.color = colors[Math.floor(Math.random() * colors.length)];
-
+    const colors = ['#007AFF', '#FF2D55', '#34C759', '#FF9500', '#AF52DE', '#5AC8FA', '#FFCC00'];
+    socket.data.color = colors[Math.floor(Math.random() * colors.length)];
 
     if (!room.creatorSocketId) room.creatorSocketId = socket.id;
 
-    // load recent messages from disk and send to this client
     const filePath = path.join(DATA_DIR, `${roomId}.json`);
-    if (fs.existsSync(filePath)) {
-      try {
-        const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        const recent = (data.messages || []).slice(-200);
-        socket.emit('history', recent);
-      } catch (e) { /* ignore */ }
-    }
+    let data = { roomId, messages: [], users: {} };
+    if (fs.existsSync(filePath)) data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+
+    data.users[socket.data.displayName] = { 
+      name: socket.data.displayName, 
+      color: socket.data.color, 
+      lastSeen: Date.now(), 
+      isOnline: true 
+    };
+    fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+
+    const recent = (data.messages || []).slice(-200);
+    socket.emit('history', recent);
 
     socket.emit('joined', { roomId, name: room.name });
-socket.to(roomId).emit('user_joined', { id: socket.id, name: socket.data.displayName, color: socket.data.color });
-  });
+    socket.to(roomId).emit('user_joined', { id: socket.id, name: socket.data.displayName, color: socket.data.color });
+    io.to(roomId).emit('last_active', data.users);
 
-  socket.on('message', ({ roomId, text }) => {
-    if (!rooms.has(roomId)) return;
-    const room = rooms.get(roomId);
-const msg = { 
-  id: nanoid(10), 
-  from: socket.data.displayName || 'Guest', 
-  text: String(text).slice(0, 2000), 
-  at: Date.now(), 
-  color: socket.data.color 
-};
-
-    // append to file
-    const filePath = path.join(DATA_DIR, `${roomId}.json`);
-    let data = { roomId, messages: [] };
-    try {
+    // ✨ Disconnect
+    socket.on('disconnect', () => {
+      let data = { messages: [], users: {} };
       if (fs.existsSync(filePath)) data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    } catch (e) { }
-    data.messages = data.messages || [];
-    data.messages.push(msg);
-    // cap
-    if (data.messages.length > 5000) data.messages.splice(0, data.messages.length - 5000);
-    try { fs.writeFileSync(filePath, JSON.stringify(data, null, 2)); } catch (e) { /* ignore write errors */ }
+      data.users[socket.data.displayName] = {
+        name: socket.data.displayName,
+        color: socket.data.color,
+        lastSeen: Date.now(),
+        isOnline: false
+      };
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+      io.to(roomId).emit('last_active', data.users);
+    });
 
-    io.to(roomId).emit('message', msg);
-  });
+    // ✨ Messages
+    socket.on('message', ({ roomId, text }) => {
+      const filePath = path.join(DATA_DIR, `${roomId}.json`);
+      const msg = { 
+        id: nanoid(10), 
+        from: socket.data.displayName || 'Guest', 
+        text: String(text).slice(0, 2000), 
+        at: Date.now(), 
+        color: socket.data.color 
+      };
 
-  socket.on('end_session', ({ roomId, sessionId }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
-    if (room.sessionId !== sessionId) { socket.emit('error_msg', 'Forbidden'); return; }
-    clearTimeout(room.timeoutObj);
-    rooms.delete(roomId);
-    io.to(roomId).emit('session_ended');
+      let data = { roomId, messages: [], users: {} };
+      if (fs.existsSync(filePath)) data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+
+      const now = new Date();
+      const nowDate = now.toLocaleDateString('en-GB');
+      const lastUserMsg = [...data.messages].reverse().find(m => !m.system);
+      const lastDate = lastUserMsg ? new Date(lastUserMsg.at).toLocaleDateString('en-GB') : null;
+
+      if (lastDate && nowDate !== lastDate) {
+        const dayMsg = { 
+          id: nanoid(8),
+          from: 'System',
+          text: `📅 ${now.toLocaleDateString([], { day: 'numeric', month: 'long', year: 'numeric' })}`,
+          at: now.getTime(),
+          system: true
+        };
+        data.messages.push(dayMsg);
+        io.to(roomId).emit('message', dayMsg);
+      }
+
+      data.messages.push(msg);
+      data.users[socket.data.displayName] = { 
+        name: socket.data.displayName, 
+        color: socket.data.color, 
+        lastSeen: Date.now(), 
+        isOnline: true 
+      };
+
+      if (data.messages.length > 5000) data.messages.splice(0, data.messages.length - 5000);
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+
+      io.to(roomId).emit('message', msg); 
+      io.to(roomId).emit('last_active', data.users);
+    });
   });
 });
 
